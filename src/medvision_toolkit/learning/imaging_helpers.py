@@ -26,6 +26,7 @@ from medvision_toolkit.radiology_helpers import (
 
 logger = logging.getLogger(__name__)
 _HTTP_HEADERS = {"User-Agent": "Mozilla/5.0"}
+_MAX_IMAGING_SUMMARY_LEN = 200
 
 
 def initialize_medgemma_engine(
@@ -140,6 +141,48 @@ def render_ai_report(report_text: str) -> None:
     display(Markdown(cleaned))
 
 
+def summarize_patient_for_imaging(profile: PatientProfile) -> str:
+    """
+    Build a concise patient context string suitable for imaging prompts.
+
+    Parameters
+    ----------
+    profile : PatientProfile
+        Structured patient record created in Notebook 01.
+
+    Returns
+    -------
+    str
+        Short summary (<= 200 characters) covering name, age, diagnosis,
+        latest vitals, and top outstanding task.
+    """
+
+    demographics = profile["demographics"]
+    vitals = profile["vitals"]
+    latest_bp = vitals["systolic_bp"][-1]
+    latest_hr = vitals["heart_rate"][-1]
+    latest_pain = vitals["pain_scores"][-1]
+    tasks = profile.get("outstanding_tasks", [])
+
+    pieces: list[str] = [
+        f"{demographics['full_name']} ({demographics['age']} y/o)",
+        profile["primary_diagnosis"],
+        f"BP {latest_bp} mmHg, HR {latest_hr} bpm, pain {latest_pain}/10",
+    ]
+
+    if tasks:
+        pieces.append(f"Tasks: {tasks[0]}")
+        if len(tasks) > 1:
+            pieces[-1] += "…"
+
+    summary = "; ".join(pieces)
+    if len(summary) <= _MAX_IMAGING_SUMMARY_LEN:
+        return summary
+
+    trimmed = summary[: _MAX_IMAGING_SUMMARY_LEN - 1].rstrip()
+    return trimmed + "…"
+
+
 def build_radiology_prompt(
     profile: PatientProfile,
     clinical_focus: str,
@@ -166,10 +209,9 @@ def build_radiology_prompt(
         Prompt ready to send to :meth:`RadiologyAI.analyze`.
     """
 
-    demographics = profile["demographics"]
-    vitals = profile["vitals"]
-    latest_bp = vitals["systolic_bp"][-1]
-    latest_pain = vitals["pain_scores"][-1]
+    snapshot = summarize_patient_for_imaging(profile)
+    sanitized_focus = " ".join(clinical_focus.split())
+    sanitized_question = " ".join(question.split())
     persona_instruction = (
         f"You are acting as a {persona}. "
         if persona
@@ -178,11 +220,9 @@ def build_radiology_prompt(
 
     prompt_lines = [
         persona_instruction,
-        f"Patient: {demographics['full_name']} ({demographics['age']} y/o, MRN {demographics['mrn']}).",
-        f"Primary diagnosis: {profile['primary_diagnosis']}.",
-        f"Clinical focus today: {clinical_focus}.",
-        f"Latest vitals — systolic BP {latest_bp} mmHg, pain score {latest_pain}/10.",
+        f"Patient context: {snapshot}.",
+        f"Clinical focus today: {sanitized_focus}.",
         "",
-        question.strip(),
+        sanitized_question,
     ]
     return "\n".join(prompt_lines)

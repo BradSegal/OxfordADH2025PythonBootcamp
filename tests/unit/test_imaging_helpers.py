@@ -15,7 +15,9 @@ from medvision_toolkit.learning.imaging_helpers import (
     initialize_medgemma_engine,
     load_and_display_image,
     render_ai_report,
+    summarize_patient_for_imaging,
 )
+from medvision_toolkit.radiology_helpers import DEFAULT_MAX_IMAGE_EDGE
 from medvision_toolkit.learning.patient_profiles import load_sample_patient
 
 
@@ -26,9 +28,11 @@ def test_initialize_medgemma_engine_uses_backend(mock_radiology_ai: MagicMock) -
     instance = MagicMock()
     mock_radiology_ai.return_value = instance
 
-    engine = initialize_medgemma_engine(backend="transformers")
+    engine = initialize_medgemma_engine(backend="transformers", max_image_edge=512)
 
-    mock_radiology_ai.assert_called_once_with(backend="transformers")
+    mock_radiology_ai.assert_called_once_with(
+        backend="transformers", max_image_edge=512
+    )
     assert engine is instance
 
 
@@ -37,6 +41,22 @@ def test_initialize_medgemma_engine_rejects_invalid_backend() -> None:
 
     with pytest.raises(ValueError):
         initialize_medgemma_engine("quantum")
+
+
+@patch("medvision_toolkit.learning.imaging_helpers.RadiologyAI")
+def test_initialize_medgemma_engine_uses_default_edge_limit(
+    mock_radiology_ai: MagicMock,
+) -> None:
+    """Default invocation should apply the library edge constraint."""
+
+    instance = MagicMock()
+    mock_radiology_ai.return_value = instance
+
+    initialize_medgemma_engine()
+
+    mock_radiology_ai.assert_called_once_with(
+        backend="gguf", max_image_edge=DEFAULT_MAX_IMAGE_EDGE
+    )
 
 
 @patch("medvision_toolkit.learning.imaging_helpers.LlavaAI")
@@ -111,6 +131,31 @@ def test_build_radiology_prompt_includes_patient_context() -> None:
         persona="radiologist",
     )
 
-    assert profile["demographics"]["full_name"] in prompt
+    assert "Jordan Nguyen" in prompt
     assert "radiologist" in prompt
     assert "Evaluate consolidation changes" in prompt
+
+
+def test_summarize_patient_for_imaging_truncates() -> None:
+    """Imaging summary should stay within the configured length constraint."""
+
+    profile = load_sample_patient()
+    summary = summarize_patient_for_imaging(profile)
+
+    assert len(summary) <= 200
+    assert "Jordan Nguyen" in summary
+    assert "Tasks:" in summary
+
+
+def test_build_radiology_prompt_collapses_whitespace() -> None:
+    """Whitespace in focus/question should be normalised."""
+
+    profile = load_sample_patient()
+    prompt = build_radiology_prompt(
+        profile=profile,
+        clinical_focus="Line one\nLine two",
+        question="What findings?\nBe specific.",
+    )
+
+    assert "Line one Line two" in prompt
+    assert "What findings? Be specific." in prompt

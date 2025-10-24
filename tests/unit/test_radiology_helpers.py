@@ -15,7 +15,11 @@ import pytest
 from PIL import Image
 import torch
 
-from medvision_toolkit.radiology_helpers import LlavaAI, RadiologyAI
+from medvision_toolkit.radiology_helpers import (
+    DEFAULT_MAX_IMAGE_EDGE,
+    LlavaAI,
+    RadiologyAI,
+)
 
 
 class TestRadiologyAI:
@@ -161,6 +165,75 @@ class TestRadiologyAI:
 
         with pytest.raises(FileNotFoundError):
             ai_engine._load_image("/path/to/nonexistent/file.jpg")
+
+    @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.AutoModelForImageTextToText.from_pretrained"
+    )
+    def test_load_image_resizes_large_inputs(
+        self, mock_model_loader, mock_processor_loader, tmp_path: Path
+    ):
+        """Images larger than the max edge should be resized proportionally."""
+        mock_model_loader.return_value = MagicMock()
+        mock_processor_loader.return_value = MagicMock()
+
+        large_image_path = tmp_path / "large.png"
+        Image.new("RGB", (1024, 512), color="green").save(large_image_path)
+
+        ai_engine = RadiologyAI(backend="transformers", max_image_edge=256)
+        loaded_image = ai_engine._load_image(str(large_image_path))
+
+        assert max(loaded_image.size) == 256
+        assert loaded_image.size[0] == 256
+        assert loaded_image.size[1] < 256
+
+    @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.AutoModelForImageTextToText.from_pretrained"
+    )
+    def test_load_image_keeps_smaller_inputs(
+        self, mock_model_loader, mock_processor_loader, tmp_path: Path
+    ):
+        """Images already below the threshold should remain unchanged."""
+        mock_model_loader.return_value = MagicMock()
+        mock_processor_loader.return_value = MagicMock()
+
+        small_image_path = tmp_path / "small.png"
+        Image.new("RGB", (64, 128), color="purple").save(small_image_path)
+
+        ai_engine = RadiologyAI(backend="transformers", max_image_edge=256)
+        loaded_image = ai_engine._load_image(str(small_image_path))
+
+        assert loaded_image.size == (64, 128)
+
+    @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.AutoModelForImageTextToText.from_pretrained"
+    )
+    def test_init_default_max_image_edge(
+        self, mock_model_loader, mock_processor_loader
+    ):
+        """Default configuration should use the library-provided limit."""
+        mock_model_loader.return_value = MagicMock()
+        mock_processor_loader.return_value = MagicMock()
+
+        ai_engine = RadiologyAI(backend="transformers")
+
+        assert ai_engine.max_image_edge == DEFAULT_MAX_IMAGE_EDGE
+
+    @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.AutoModelForImageTextToText.from_pretrained"
+    )
+    def test_init_rejects_invalid_max_image_edge(
+        self, mock_model_loader, mock_processor_loader
+    ):
+        """Non-positive edge limits should raise immediately."""
+        mock_model_loader.return_value = MagicMock()
+        mock_processor_loader.return_value = MagicMock()
+
+        with pytest.raises(ValueError):
+            RadiologyAI(backend="transformers", max_image_edge=0)
 
     @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
     @patch(
@@ -505,3 +578,39 @@ class TestLlavaAI:
             )
             assert isinstance(loaded_image, Image.Image)
             assert loaded_image.mode == "RGB"
+
+    @patch("medvision_toolkit.radiology_helpers.requests.get")
+    @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.LlavaForConditionalGeneration.from_pretrained"
+    )
+    def test_load_image_resizes_large_inputs(
+        self,
+        mock_model_loader,
+        mock_processor_loader,
+        mock_requests_get,
+    ):
+        """Large remote images should be resized before inference."""
+        mock_model_loader.return_value = MagicMock()
+        mock_processor_loader.return_value = MagicMock()
+
+        large_image = Image.new("RGB", (2048, 512), color="orange")
+        buffer = BytesIO()
+        large_image.save(buffer, format="PNG")
+        buffer.seek(0)
+
+        response = MagicMock()
+        response.content = buffer.read()
+        mock_requests_get.return_value = response
+
+        ai_engine = LlavaAI()
+        resized = ai_engine._load_image("http://example.com/large.png")
+
+        assert max(resized.size) == DEFAULT_MAX_IMAGE_EDGE
+        assert resized.size[0] == DEFAULT_MAX_IMAGE_EDGE
+        assert resized.size[1] < DEFAULT_MAX_IMAGE_EDGE
+
+    def test_init_rejects_invalid_max_image_edge(self):
+        """Initialisation should fail for invalid resize limits."""
+        with pytest.raises(ValueError):
+            LlavaAI(max_image_edge=0)

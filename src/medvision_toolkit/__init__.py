@@ -40,6 +40,7 @@ from medvision_toolkit.learning import (
     load_and_display_image,
     plot_vital_trends,
     render_ai_report,
+    summarize_patient_for_imaging,
     summarize_patient,
     triage_pain_scores,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "load_and_display_image",
     "plot_vital_trends",
     "render_ai_report",
+    "summarize_patient_for_imaging",
     "summarize_patient",
     "triage_pain_scores",
 ]
