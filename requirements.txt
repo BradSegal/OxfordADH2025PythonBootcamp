@@ -1,0 +1,18 @@
+# Core ML and data handling
+transformers>=4.40.0
+torch
+accelerate
+Pillow
+requests
+llama-cpp-python
+
+# Notebook environment and visualization
+matplotlib
+ipykernel
+ipywidgets
+
+# Development and testing
+pytest>=7.0.0
+black>=23.0.0
+ruff>=0.1.0
+mypy>=1.0.0
