@@ -26,6 +26,7 @@ from transformers import (
 logger = logging.getLogger(__name__)
 _DEFAULT_HTTP_HEADERS = {"User-Agent": "Mozilla/5.0"}
 DEFAULT_MAX_IMAGE_EDGE = 256
+DEFAULT_STOP_MARKERS: tuple[str, ...] = ("<end_of_turn>",)
 
 _LANCZOS_FILTER: Any
 try:
@@ -123,9 +124,11 @@ class RadiologyAI:
         self.max_image_edge = max_image_edge
         self.backend = backend.lower()
         self.chat_handler: Optional[Any] = None
+        self.stop_tokens: list[str] = []
         if self.backend == "gguf":
             self.device = "cpu"  # llama.cpp handles its own device usage
-            stop_tokens = gguf_stop or ["<end_of_turn>"]
+            stop_tokens = list(gguf_stop or ["<end_of_turn>"])
+            self.stop_tokens = stop_tokens
             self._init_gguf_backend(
                 gguf_model_id, gguf_filename, gguf_mmproj, stop_tokens
             )
@@ -194,7 +197,6 @@ class RadiologyAI:
             )
             self.chat_handler = chat_handler
             self.processor = None
-            self.gguf_stop_tokens = stop_tokens
             if gpu_available:
                 logger.info("RadiologyAI (GGUF) initialized with GPU acceleration.")
             else:
@@ -275,9 +277,7 @@ class RadiologyAI:
         output = self.model.generate(**inputs, max_new_tokens=300)
 
         decoded_text: str = self.processor.decode(output[0], skip_special_tokens=True)
-        if "assistant\n" in decoded_text:
-            return decoded_text.split("assistant\n", maxsplit=1)[-1].strip()
-        return decoded_text.strip()
+        return self._sanitize_output(decoded_text)
 
     def _analyze_with_llama_cpp(
         self, image_path_or_url: str, prompt: str, persona: str
@@ -307,15 +307,30 @@ class RadiologyAI:
             self.llm.create_chat_completion(
                 messages=cast(list[Any], messages),
                 max_tokens=512,
-                stop=self.gguf_stop_tokens,
+                stop=self.stop_tokens,
             ),
         )
 
         message = response["choices"][0]["message"]
-        content = (message.get("content") or "").strip()
-        if content.startswith("assistant\n"):
-            content = content.split("assistant\n", maxsplit=1)[-1].strip()
+        content = self._sanitize_output(message.get("content") or "")
         return content
+
+    def _sanitize_output(self, generated_text: str) -> str:
+        """Remove chat prefixes and GGUF stop tokens from model output."""
+
+        cleaned = generated_text.strip()
+        if cleaned.startswith("assistant\n"):
+            cleaned = cleaned.split("assistant\n", maxsplit=1)[-1].strip()
+
+        stop_markers = set(DEFAULT_STOP_MARKERS)
+        stop_markers.update(self.stop_tokens)
+        for token in stop_markers:
+            if token:
+                cleaned = cleaned.replace(token, "")
+
+        cleaned = cleaned.strip()
+
+        return cleaned
 
     def _load_image(self, image_path_or_url: str) -> Image.Image:
         """

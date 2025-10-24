@@ -39,6 +39,7 @@ target-version = ["py39"]
 [tool.ruff]
 line-length = 88
 target-version = "py39"
+extend-exclude = ["notebooks"]
 
 [tool.mypy]
 python_version = "3.9"

@@ -262,7 +262,9 @@ class TestRadiologyAI:
         mock_output = MagicMock()
         mock_model.generate.return_value = mock_output
 
-        canned_response = "assistant\nThis is a test report showing normal findings."
+        canned_response = (
+            "assistant\nThis is a test report showing normal findings.<end_of_turn>"
+        )
         mock_processor.decode.return_value = canned_response
         mock_processor.apply_chat_template.return_value = "formatted_prompt"
 
@@ -363,7 +365,13 @@ class TestRadiologyAI:
         mock_chat_handler_loader.return_value = mock_chat_handler
         mock_llama = MagicMock()
         mock_llama.create_chat_completion.return_value = {
-            "choices": [{"message": {"content": "assistant\nGGUF response"}}]
+            "choices": [
+                {
+                    "message": {
+                        "content": "assistant\nGGUF response with detail.<end_of_turn>"
+                    }
+                }
+            ]
         }
         mock_llama_loader.return_value = mock_llama
 
@@ -412,7 +420,7 @@ class TestRadiologyAI:
         assert base64.b64decode(encoded_payload) == image_bytes
         assert "Explain this image" in text_item["text"]
 
-        assert result == "GGUF response"
+        assert result == "GGUF response with detail."
 
 
 class TestLlavaAI:
