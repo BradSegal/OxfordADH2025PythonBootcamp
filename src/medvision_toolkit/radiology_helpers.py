@@ -25,6 +25,46 @@ from transformers import (
 
 logger = logging.getLogger(__name__)
 _DEFAULT_HTTP_HEADERS = {"User-Agent": "Mozilla/5.0"}
+DEFAULT_MAX_IMAGE_EDGE = 256
+
+_LANCZOS_FILTER: Any
+try:
+    _LANCZOS_FILTER = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+except AttributeError:  # pragma: no cover - Pillow < 10 compatibility
+    _LANCZOS_FILTER = Image.LANCZOS  # type: ignore[attr-defined]
+
+
+def _enforce_max_image_edge(image: Image.Image, max_edge: int) -> Image.Image:
+    """
+    Constrain an image so its longest edge does not exceed ``max_edge`` pixels.
+
+    Parameters
+    ----------
+    image : PIL.Image.Image
+        Input image in RGB mode.
+    max_edge : int
+        Maximum allowed size for the longest edge. Must be a positive integer.
+
+    Returns
+    -------
+    PIL.Image.Image
+        The original image if already within bounds, otherwise a resized copy.
+
+    Raises
+    ------
+    ValueError
+        If ``max_edge`` is not a positive integer.
+    """
+    if max_edge <= 0:
+        raise ValueError("max_edge must be a positive integer.")
+
+    width, height = image.size
+    if max(width, height) <= max_edge:
+        return image
+
+    resized = image.copy()
+    resized.thumbnail((max_edge, max_edge), _LANCZOS_FILTER)
+    return resized
 
 
 class RadiologyAI:
@@ -42,6 +82,8 @@ class RadiologyAI:
         The repository containing the GGUF weights.
     gguf_mmproj : str, optional
         The multimodal projection file required by llama.cpp for vision inputs.
+    max_image_edge : int, optional
+        Maximum size (in pixels) for the image's longest edge before inference.
     """
 
     def __init__(
@@ -52,6 +94,7 @@ class RadiologyAI:
         gguf_model_id: str = "unsloth/medgemma-4b-it-GGUF",
         gguf_mmproj: str = "mmproj-F16.gguf",
         gguf_stop: Optional[list[str]] = None,
+        max_image_edge: int = DEFAULT_MAX_IMAGE_EDGE,
     ) -> None:
         """
         Initialize the RadiologyAI engine by loading the MedGemma model.
@@ -64,12 +107,20 @@ class RadiologyAI:
         model_id : str, optional
             The Hugging Face model identifier (default: "google/medgemma-4b-it").
 
+        max_image_edge : int, optional
+            Maximum size for the image's longest edge (default: 256).
+
         Raises
         ------
         Exception
             If the model fails to load due to network errors, insufficient memory,
             or missing dependencies. The exception will be re-raised to halt execution.
+        ValueError
+            If ``max_image_edge`` is not a positive integer.
         """
+        if max_image_edge <= 0:
+            raise ValueError("max_image_edge must be a positive integer.")
+        self.max_image_edge = max_image_edge
         self.backend = backend.lower()
         self.chat_handler: Optional[Any] = None
         if self.backend == "gguf":
@@ -295,7 +346,7 @@ class RadiologyAI:
             image = Image.open(BytesIO(response.content)).convert("RGB")
         else:
             image = Image.open(image_path_or_url).convert("RGB")
-        return image
+        return _enforce_max_image_edge(image, self.max_image_edge)
 
 
 class LlavaAI:
@@ -324,7 +375,11 @@ class LlavaAI:
     ... )
     """
 
-    def __init__(self, model_id: str = "llava-hf/llava-1.5-7b-hf") -> None:
+    def __init__(
+        self,
+        model_id: str = "llava-hf/llava-1.5-7b-hf",
+        max_image_edge: int = DEFAULT_MAX_IMAGE_EDGE,
+    ) -> None:
         """
         Initialize the LlavaAI engine by loading the LLaVA model.
 
@@ -335,12 +390,16 @@ class LlavaAI:
         ----------
         model_id : str, optional
             The Hugging Face model identifier (default: "llava-hf/llava-1.5-7b-hf").
+        max_image_edge : int, optional
+            Maximum size for the image's longest edge (default: 256).
 
         Raises
         ------
         Exception
             If the model fails to load due to network errors, insufficient memory,
             or missing dependencies. The exception will be re-raised to halt execution.
+        ValueError
+            If ``max_image_edge`` is not a positive integer.
         """
         logger.info("Initializing LlavaAI with model: %s...", model_id)
         logger.info(
@@ -348,6 +407,9 @@ class LlavaAI:
         )
 
         try:
+            if max_image_edge <= 0:
+                raise ValueError("max_image_edge must be a positive integer.")
+            self.max_image_edge = max_image_edge
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
             logger.info("LlavaAI using device: %s", self.device)
 
@@ -465,4 +527,4 @@ class LlavaAI:
             image = Image.open(BytesIO(response.content)).convert("RGB")
         else:
             image = Image.open(image_path_or_url).convert("RGB")
-        return image
+        return _enforce_max_image_edge(image, self.max_image_edge)

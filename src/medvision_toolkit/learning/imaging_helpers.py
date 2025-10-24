@@ -18,13 +18,19 @@ from IPython.display import Markdown, display  # type: ignore
 from PIL import Image
 
 from medvision_toolkit.learning.patient_profiles import PatientProfile
-from medvision_toolkit.radiology_helpers import LlavaAI, RadiologyAI
+from medvision_toolkit.radiology_helpers import (
+    DEFAULT_MAX_IMAGE_EDGE,
+    LlavaAI,
+    RadiologyAI,
+)
 
 logger = logging.getLogger(__name__)
 _HTTP_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 
-def initialize_medgemma_engine(backend: str = "gguf") -> RadiologyAI:
+def initialize_medgemma_engine(
+    backend: str = "gguf", max_image_edge: int = DEFAULT_MAX_IMAGE_EDGE
+) -> RadiologyAI:
     """
     Initialise the MedGemma-backed radiology engine.
 
@@ -33,6 +39,9 @@ def initialize_medgemma_engine(backend: str = "gguf") -> RadiologyAI:
     backend : str, optional
         Either ``\"gguf\"`` (default) for llama.cpp or ``\"transformers\"`` for the
         Hugging Face backend. Any unexpected value raises ``ValueError``.
+
+    max_image_edge : int, optional
+        Maximum size for the image's longest edge in pixels.
 
     Returns
     -------
@@ -44,7 +53,10 @@ def initialize_medgemma_engine(backend: str = "gguf") -> RadiologyAI:
     if backend_normalised not in {"gguf", "transformers"}:
         raise ValueError("backend must be either 'gguf' or 'transformers'.")
     logger.info("Initialising RadiologyAI with %s backend.", backend_normalised)
-    return RadiologyAI(backend=backend_normalised)
+    return RadiologyAI(
+        backend=backend_normalised,
+        max_image_edge=max_image_edge,
+    )
 
 
 def initialize_llava_engine() -> LlavaAI:
