@@ -45,7 +45,11 @@ from medvision_toolkit.learning import (
     summarize_patient,
     triage_pain_scores,
 )
-from medvision_toolkit.radiology_helpers import LlavaAI, RadiologyAI
+from medvision_toolkit.radiology_helpers import (
+    LlavaAI,
+    RadiologyAI,
+    llama_cpp_has_cuda_support,
+)
 
 __version__ = "0.1.0"
 __all__ = [
@@ -72,4 +76,5 @@ __all__ = [
     "summarize_patient_for_imaging",
     "summarize_patient",
     "triage_pain_scores",
+    "llama_cpp_has_cuda_support",
 ]

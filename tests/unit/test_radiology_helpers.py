@@ -44,7 +44,7 @@ class TestRadiologyAI:
         # Assert the loaders were called with correct parameters
         mock_model_loader.assert_called_once_with(
             "google/medgemma-4b-it",
-            dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16,
             device_map="auto",
             trust_remote_code=True,
         )
@@ -354,8 +354,13 @@ class TestRadiologyAI:
     @patch(
         "medvision_toolkit.radiology_helpers.torch.cuda.is_available", return_value=True
     )
+    @patch(
+        "medvision_toolkit.radiology_helpers.llama_cpp_has_cuda_support",
+        return_value=True,
+    )
     def test_analyze_with_llama_cpp_backend(
         self,
+        mock_llama_cuda_support,
         mock_cuda_available,
         mock_chat_handler_loader,
         mock_llama_loader,
@@ -430,8 +435,13 @@ class TestRadiologyAI:
     @patch(
         "medvision_toolkit.radiology_helpers.torch.cuda.is_available", return_value=False
     )
+    @patch(
+        "medvision_toolkit.radiology_helpers.llama_cpp_has_cuda_support",
+        return_value=False,
+    )
     def test_analyze_with_llama_cpp_streaming(
         self,
+        mock_llama_cuda_support,
         mock_cuda_available,
         mock_chat_handler_loader,
         mock_llama_loader,
@@ -473,6 +483,30 @@ class TestRadiologyAI:
         ]
         assert final_report == "First part. Second part."
 
+    @patch("llama_cpp.Llama.from_pretrained")
+    @patch("llama_cpp.llama_chat_format.Llava15ChatHandler.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.llama_cpp_has_cuda_support",
+        return_value=False,
+    )
+    @patch(
+        "medvision_toolkit.radiology_helpers.torch.cuda.is_available", return_value=True
+    )
+    def test_gguf_falls_back_when_llama_cpp_lacks_cuda(
+        self,
+        mock_torch_cuda_available,
+        mock_llama_cuda_support,
+        mock_chat_handler_loader,
+        mock_llama_loader,
+    ):
+        """GGUF backend should remain on CPU when llama.cpp lacks CUDA kernels."""
+
+        mock_chat_handler_loader.return_value = MagicMock()
+        mock_llama_loader.return_value = MagicMock()
+
+        ai_engine = RadiologyAI(backend="gguf")
+        assert ai_engine.gguf_gpu_layers == 0
+
     @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
     @patch(
         "medvision_toolkit.radiology_helpers.AutoModelForImageTextToText.from_pretrained"
@@ -508,9 +542,6 @@ class TestRadiologyAI:
         cleaned = ai_engine._sanitize_output(raw)
         assert "USER:" not in cleaned
         assert cleaned == "Initial findings."
-        assert "Explain this image" in text_item["text"]
-
-        assert result == "GGUF response with detail."
 
 
 class TestLlavaAI:

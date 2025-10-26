@@ -10,6 +10,7 @@ prompt templating, and inference, providing a simple `analyze()` interface.
 """
 
 import base64
+import importlib.util
 import logging
 from io import BytesIO
 from typing import Any, Callable, Dict, Optional, Sequence, cast
@@ -85,6 +86,22 @@ class _StopOnSubstrings(StoppingCriteria):
         token_ids = input_ids[0].tolist()
         generated_text = self.processor.decode(token_ids, skip_special_tokens=False)
         return any(marker in generated_text for marker in self.stop_strings)
+
+
+def llama_cpp_has_cuda_support() -> bool:
+    """
+    Determine whether the llama.cpp Python bindings expose CUDA kernels.
+
+    Returns
+    -------
+    bool
+        ``True`` when the CUDA extension module is present, otherwise ``False``.
+    """
+
+    try:
+        return importlib.util.find_spec("llama_cpp.llama_cpp_cuda") is not None
+    except (ImportError, AttributeError):  # pragma: no cover - defensive guard
+        return False
 
 
 class RadiologyAI:
@@ -189,7 +206,7 @@ class RadiologyAI:
             logger.info("RadiologyAI (Transformers) using device: %s", self.device)
             self.model = AutoModelForImageTextToText.from_pretrained(
                 model_id,
-                dtype=torch.bfloat16,
+                torch_dtype=torch.bfloat16,
                 device_map="auto",
                 trust_remote_code=True,
             )
@@ -224,11 +241,22 @@ class RadiologyAI:
 
         try:
             llama_cpp_logger.logger.setLevel(logging.CRITICAL + 10)
-            gpu_available = False
+            torch_cuda_available = False
             try:
-                gpu_available = torch.cuda.is_available()
+                torch_cuda_available = torch.cuda.is_available()
             except Exception:
-                gpu_available = False
+                logger.warning(
+                    "Unable to query torch CUDA availability; defaulting to CPU.",
+                    exc_info=True,
+                )
+            llama_cuda_available = llama_cpp_has_cuda_support()
+            if torch_cuda_available and not llama_cuda_available:
+                logger.warning(
+                    "CUDA GPU detected, but llama.cpp bindings lack CUDA support. "
+                    "Reinstall llama-cpp-python with CUDA wheels to enable acceleration."
+                )
+
+            gpu_available = torch_cuda_available and llama_cuda_available
 
             self.gguf_gpu_layers = -1 if gpu_available else 0
 
@@ -413,6 +441,10 @@ class RadiologyAI:
         if cleaned.startswith("assistant\n"):
             cleaned = cleaned.split("assistant\n", maxsplit=1)[-1].strip()
 
+        user_marker = "\nUSER:"
+        if user_marker in cleaned:
+            cleaned = cleaned.split(user_marker, maxsplit=1)[0].rstrip()
+
         stop_markers = set(DEFAULT_STOP_MARKERS)
         stop_markers.update(self.stop_tokens)
         for token in stop_markers:
@@ -420,10 +452,6 @@ class RadiologyAI:
                 cleaned = cleaned.replace(token, "")
 
         cleaned = cleaned.strip()
-        user_marker = "\nUSER:"
-        if user_marker in cleaned:
-            cleaned = cleaned.split(user_marker, maxsplit=1)[0].rstrip()
-
         return cleaned
 
     def _load_image(self, image_path_or_url: str) -> Image.Image:
