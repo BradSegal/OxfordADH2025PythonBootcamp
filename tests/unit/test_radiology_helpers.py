@@ -16,6 +16,7 @@ from PIL import Image
 import torch
 
 from medvision_toolkit.radiology_helpers import (
+    DEFAULT_CONTEXT_TOKENS,
     DEFAULT_MAX_IMAGE_EDGE,
     LlavaAI,
     RadiologyAI,
@@ -399,6 +400,7 @@ class TestRadiologyAI:
             repo_id="unsloth/medgemma-4b-it-GGUF",
             filename="medgemma-4b-it-Q4_0.gguf",
             verbose=False,
+            n_ctx=DEFAULT_CONTEXT_TOKENS,
             n_gpu_layers=-1,
             chat_handler=mock_chat_handler,
         )
@@ -412,12 +414,100 @@ class TestRadiologyAI:
         image_item = next(
             item for item in content_items if item.get("type") == "image_url"
         )
-        text_item = next(item for item in content_items if item.get("type") == "text")
         data_url = image_item["image_url"]
         assert isinstance(data_url, str)
         assert data_url.startswith("data:image/png;base64,")
         encoded_payload = data_url.split("data:image/png;base64,", maxsplit=1)[-1]
         assert base64.b64decode(encoded_payload) == image_bytes
+        stop_markers = mock_llama.create_chat_completion.call_args[1]["stop"]
+        assert "\nUSER:" in stop_markers
+        assert "USER:" in stop_markers
+        assert result == "GGUF response with detail."
+
+    @patch("medvision_toolkit.radiology_helpers.requests.get")
+    @patch("llama_cpp.Llama.from_pretrained")
+    @patch("llama_cpp.llama_chat_format.Llava15ChatHandler.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.torch.cuda.is_available", return_value=False
+    )
+    def test_analyze_with_llama_cpp_streaming(
+        self,
+        mock_cuda_available,
+        mock_chat_handler_loader,
+        mock_llama_loader,
+        mock_requests_get,
+    ):
+        """Streaming mode should emit chunks and return the full sanitized report."""
+
+        mock_chat_handler = MagicMock()
+        mock_chat_handler_loader.return_value = mock_chat_handler
+
+        def fake_stream(*args, **kwargs):
+            assert kwargs["stream"] is True
+            yield {"choices": [{"delta": {"content": "assistant\nFirst part. "}}]}
+            yield {"choices": [{"delta": {"content": "Second part.<end_of_turn>"}}]}
+
+        mock_llama = MagicMock()
+        mock_llama.create_chat_completion.side_effect = fake_stream
+        mock_llama_loader.return_value = mock_llama
+
+        test_image = Image.new("RGB", (32, 32), color="white")
+        buf = BytesIO()
+        test_image.save(buf, format="PNG")
+        buf.seek(0)
+        mock_response = MagicMock()
+        mock_response.content = buf.read()
+        mock_requests_get.return_value = mock_response
+
+        captured_chunks: list[str] = []
+        ai_engine = RadiologyAI(backend="gguf")
+        final_report = ai_engine.analyze(
+            "http://example.com/stream.jpg",
+            "Provide details.",
+            stream_callback=captured_chunks.append,
+        )
+
+        assert captured_chunks == [
+            "assistant\nFirst part. ",
+            "Second part.<end_of_turn>",
+        ]
+        assert final_report == "First part. Second part."
+
+    @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.AutoModelForImageTextToText.from_pretrained"
+    )
+    def test_default_stop_tokens_include_user_marker(
+        self, mock_model_loader, mock_processor_loader
+    ):
+        """RadiologyAI should include USER markers in default stop tokens."""
+        mock_model_loader.return_value = MagicMock()
+        mock_processor_loader.return_value = MagicMock()
+
+        ai_engine = RadiologyAI(backend="transformers")
+        assert "\nUSER:" in ai_engine.stop_tokens
+        assert "USER:" in ai_engine.stop_tokens
+
+    @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.AutoModelForImageTextToText.from_pretrained"
+    )
+    def test_sanitize_output_truncates_followup_user_block(
+        self, mock_model_loader, mock_processor_loader
+    ):
+        """_sanitize_output should trim any follow-up USER turns."""
+        mock_model_loader.return_value = MagicMock()
+        processor = MagicMock()
+        mock_processor_loader.return_value = processor
+
+        ai_engine = RadiologyAI(backend="transformers")
+        raw = (
+            "assistant\nInitial findings.\nUSER: Provide additional context.\n"
+            "ASSISTANT: Irrelevant follow up."
+        )
+        cleaned = ai_engine._sanitize_output(raw)
+        assert "USER:" not in cleaned
+        assert cleaned == "Initial findings."
         assert "Explain this image" in text_item["text"]
 
         assert result == "GGUF response with detail."

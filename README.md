@@ -45,10 +45,12 @@ All complexity lives in the helper library so notebooks stay approachable. Key m
 - **`learning.imaging_helpers`**
   - High-level functions to initialise the MedGemma (`initialize_medgemma_engine`) and LLaVA (`initialize_llava_engine`) backends without exposing model-loading intricacies.
   - Prompt-construction utilities (`build_radiology_prompt`) and display helpers (`load_and_display_image`, `render_ai_report`) that manage HTTP fetching, persona framing, and Markdown rendering.
+  - Streaming-friendly display via `stream_ai_report`, which progressively updates notebook output when the GGUF backend is active.
 - **`radiology_helpers`**
   - `RadiologyAI`: the production vision-language engine supporting both GGUF (llama.cpp) and Transformers backends, complete with strict input validation and fail-fast error handling.
   - `LlavaAI`: an experimental comparator that mirrors the same `analyze()` contract so students can benchmark outputs side by side.
   - Shared image-loading utilities that differentiate local paths and HTTPS sources while surfacing network/file errors immediately.
+  - Unified token budgeting lives in `DEFAULT_CONTEXT_TOKENS` and `DEFAULT_MAX_GENERATED_TOKENS`; both backends read these constants. Adjust them (or pass `context_tokens` / `max_generated_tokens` to `RadiologyAI` and `LlavaAI`) when you need longer reports or tighter limits.
 
 Because interfaces are strictly typed, extending the toolkit means honouring existing contracts—functions and methods should return explicit data structures, raise precise exceptions, and avoid silent fallbacks.
 

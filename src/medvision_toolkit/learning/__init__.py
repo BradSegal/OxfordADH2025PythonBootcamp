@@ -29,6 +29,7 @@ from medvision_toolkit.learning.imaging_helpers import (
     initialize_medgemma_engine,
     load_and_display_image,
     render_ai_report,
+    stream_ai_report,
     summarize_patient_for_imaging,
 )
 
@@ -48,6 +49,7 @@ __all__ = [
     "initialize_medgemma_engine",
     "load_and_display_image",
     "render_ai_report",
+    "stream_ai_report",
     "summarize_patient_for_imaging",
     "load_sample_patient",
     "plot_vital_trends",

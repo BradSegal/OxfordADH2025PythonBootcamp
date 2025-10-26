@@ -141,6 +141,65 @@ def render_ai_report(report_text: str) -> None:
     display(Markdown(cleaned))
 
 
+def stream_ai_report(
+    engine: RadiologyAI,
+    image_path_or_url: str,
+    prompt: str,
+    persona: str,
+) -> str:
+    """
+    Generate and display an AI report, streaming updates when supported.
+
+    Parameters
+    ----------
+    engine : RadiologyAI
+        Initialised MedGemma engine.
+    image_path_or_url : str
+        Location of the image to analyse.
+    prompt : str
+        Prompt provided to the engine.
+    persona : str
+        Persona applied during analysis.
+
+    Returns
+    -------
+    str
+        The final sanitised report text.
+    """
+
+    supports_streaming = isinstance(engine, RadiologyAI) and engine.backend == "gguf"
+
+    if supports_streaming:
+        chunks: list[str] = []
+        handle = display(
+            Markdown("_Generating AI preliminary report…_"), display_id=True
+        )
+
+        def _on_chunk(update: str) -> None:
+            chunks.append(update)
+            partial = engine._sanitize_output("".join(chunks))
+            if partial:
+                handle.update(Markdown(partial))
+
+        final_report = engine.analyze(
+            image_path_or_url=image_path_or_url,
+            prompt=prompt,
+            persona=persona,
+            stream_callback=_on_chunk,
+        )
+
+        handle.update(Markdown(final_report))
+        return final_report
+
+    final_report = engine.analyze(
+        image_path_or_url=image_path_or_url,
+        prompt=prompt,
+        persona=persona,
+    )
+    render_ai_report(final_report)
+    return final_report
+
+
 def summarize_patient_for_imaging(profile: PatientProfile) -> str:
     """
     Build a concise patient context string suitable for imaging prompts.

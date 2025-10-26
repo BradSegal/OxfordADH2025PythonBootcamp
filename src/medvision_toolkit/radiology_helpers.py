@@ -12,7 +12,7 @@ prompt templating, and inference, providing a simple `analyze()` interface.
 import base64
 import logging
 from io import BytesIO
-from typing import Any, Dict, Optional, cast
+from typing import Any, Callable, Dict, Optional, Sequence, cast
 
 import requests
 import torch
@@ -21,12 +21,16 @@ from transformers import (
     AutoModelForImageTextToText,
     AutoProcessor,
     LlavaForConditionalGeneration,
+    StoppingCriteria,
+    StoppingCriteriaList,
 )
 
 logger = logging.getLogger(__name__)
 _DEFAULT_HTTP_HEADERS = {"User-Agent": "Mozilla/5.0"}
 DEFAULT_MAX_IMAGE_EDGE = 256
-DEFAULT_STOP_MARKERS: tuple[str, ...] = ("<end_of_turn>",)
+DEFAULT_STOP_MARKERS: tuple[str, ...] = ("<end_of_turn>", "\nUSER:", "USER:")
+DEFAULT_CONTEXT_TOKENS = 8192
+DEFAULT_MAX_GENERATED_TOKENS = 1024
 
 _LANCZOS_FILTER: Any
 try:
@@ -68,6 +72,21 @@ def _enforce_max_image_edge(image: Image.Image, max_edge: int) -> Image.Image:
     return resized
 
 
+class _StopOnSubstrings(StoppingCriteria):
+    """Custom stopping criteria that halts generation on defined substrings."""
+
+    def __init__(self, stop_strings: Sequence[str], processor: AutoProcessor) -> None:
+        self.stop_strings = [marker for marker in stop_strings if marker]
+        self.processor = processor
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: Any) -> bool:  # type: ignore[override]
+        if not self.stop_strings:
+            return False
+        token_ids = input_ids[0].tolist()
+        generated_text = self.processor.decode(token_ids, skip_special_tokens=False)
+        return any(marker in generated_text for marker in self.stop_strings)
+
+
 class RadiologyAI:
     """Primary AI engine for MedVision with selectable backends.
 
@@ -96,6 +115,8 @@ class RadiologyAI:
         gguf_mmproj: str = "mmproj-F16.gguf",
         gguf_stop: Optional[list[str]] = None,
         max_image_edge: int = DEFAULT_MAX_IMAGE_EDGE,
+        context_tokens: Optional[int] = None,
+        max_generated_tokens: Optional[int] = None,
     ) -> None:
         """
         Initialize the RadiologyAI engine by loading the MedGemma model.
@@ -110,6 +131,12 @@ class RadiologyAI:
 
         max_image_edge : int, optional
             Maximum size for the image's longest edge (default: 256).
+        context_tokens : int, optional
+            Context window in tokens for text-image conversations. Shared across
+            backends; defaults to ``DEFAULT_CONTEXT_TOKENS``.
+        max_generated_tokens : int, optional
+            Maximum number of tokens generated per response. Shared across
+            backends; defaults to ``DEFAULT_MAX_GENERATED_TOKENS``.
 
         Raises
         ------
@@ -121,16 +148,34 @@ class RadiologyAI:
         """
         if max_image_edge <= 0:
             raise ValueError("max_image_edge must be a positive integer.")
+        self.context_tokens = context_tokens or DEFAULT_CONTEXT_TOKENS
+        if self.context_tokens <= 0:
+            raise ValueError("context_tokens must be a positive integer.")
+        self.max_generated_tokens = (
+            max_generated_tokens or DEFAULT_MAX_GENERATED_TOKENS
+        )
+        if self.max_generated_tokens <= 0:
+            raise ValueError("max_generated_tokens must be a positive integer.")
         self.max_image_edge = max_image_edge
         self.backend = backend.lower()
         self.chat_handler: Optional[Any] = None
-        self.stop_tokens: list[str] = []
+        base_stop_tokens: list[str] = []
+        if gguf_stop is not None:
+            for token in gguf_stop:
+                if token and token not in base_stop_tokens:
+                    base_stop_tokens.append(token)
+        for marker in DEFAULT_STOP_MARKERS:
+            if marker and marker not in base_stop_tokens:
+                base_stop_tokens.append(marker)
+        self.stop_tokens: list[str] = base_stop_tokens
         if self.backend == "gguf":
             self.device = "cpu"  # llama.cpp handles its own device usage
-            stop_tokens = list(gguf_stop or ["<end_of_turn>"])
-            self.stop_tokens = stop_tokens
             self._init_gguf_backend(
-                gguf_model_id, gguf_filename, gguf_mmproj, stop_tokens
+                gguf_model_id,
+                gguf_filename,
+                gguf_mmproj,
+                self.stop_tokens,
+                self.context_tokens,
             )
         else:
             self._init_transformers_backend(model_id)
@@ -157,7 +202,12 @@ class RadiologyAI:
             raise
 
     def _init_gguf_backend(
-        self, repo_id: str, filename: str, mmproj_filename: str, stop_tokens: list[str]
+        self,
+        repo_id: str,
+        filename: str,
+        mmproj_filename: str,
+        stop_tokens: list[str],
+        context_tokens: int,
     ) -> None:
         logger.info(
             "Initializing RadiologyAI (GGUF) with repo %s and file %s...",
@@ -192,6 +242,7 @@ class RadiologyAI:
                 repo_id=repo_id,
                 filename=filename,
                 verbose=False,
+                n_ctx=context_tokens,
                 n_gpu_layers=self.gguf_gpu_layers,
                 chat_handler=chat_handler,
             )
@@ -208,7 +259,11 @@ class RadiologyAI:
             raise
 
     def analyze(
-        self, image_path_or_url: str, prompt: str, persona: str = "radiologist"
+        self,
+        image_path_or_url: str,
+        prompt: str,
+        persona: str = "radiologist",
+        stream_callback: Optional[Callable[[str], None]] = None,
     ) -> str:
         """
         Analyze a medical image and return a text-based report.
@@ -226,6 +281,10 @@ class RadiologyAI:
         persona : str, optional
             The expert persona the AI should adopt (default: "radiologist").
             Examples: "radiologist", "cardiologist", "pathologist".
+        stream_callback : Callable[[str], None], optional
+            Streaming callback invoked with incremental text chunks when the
+            GGUF backend is used. When provided, generation is streamed while
+            the final consolidated report is still returned.
 
         Returns
         -------
@@ -250,7 +309,9 @@ class RadiologyAI:
             If model generation fails due to resource constraints or other runtime issues.
         """
         if self.backend == "gguf":
-            return self._analyze_with_llama_cpp(image_path_or_url, prompt, persona)
+            return self._analyze_with_llama_cpp(
+                image_path_or_url, prompt, persona, stream_callback
+            )
 
         image = self._load_image(image_path_or_url)
         system_prompt = f"You are an expert {persona}."
@@ -274,13 +335,24 @@ class RadiologyAI:
             self.device, torch.bfloat16
         )
 
-        output = self.model.generate(**inputs, max_new_tokens=300)
+        generate_kwargs: dict[str, Any] = {"max_new_tokens": self.max_generated_tokens}
+        if self.stop_tokens:
+            stopping_list = StoppingCriteriaList(
+                [_StopOnSubstrings(self.stop_tokens, self.processor)]
+            )
+            generate_kwargs["stopping_criteria"] = stopping_list
+
+        output = self.model.generate(**inputs, **generate_kwargs)
 
         decoded_text: str = self.processor.decode(output[0], skip_special_tokens=True)
         return self._sanitize_output(decoded_text)
 
     def _analyze_with_llama_cpp(
-        self, image_path_or_url: str, prompt: str, persona: str
+        self,
+        image_path_or_url: str,
+        prompt: str,
+        persona: str,
+        stream_callback: Optional[Callable[[str], None]],
     ) -> str:
         image = self._load_image(image_path_or_url)
         buffer = BytesIO()
@@ -302,18 +374,37 @@ class RadiologyAI:
             },
         ]
 
-        response = cast(
-            Dict[str, Any],
-            self.llm.create_chat_completion(
+        if stream_callback is not None:
+            stream = self.llm.create_chat_completion(
                 messages=cast(list[Any], messages),
-                max_tokens=512,
+                max_tokens=self.max_generated_tokens,
                 stop=self.stop_tokens,
-            ),
-        )
+                stream=True,
+            )
+            chunks: list[str] = []
+            for update in stream:
+                choices = update.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                piece = delta.get("content")
+                if piece:
+                    chunks.append(piece)
+                    stream_callback(piece)
+            raw_text = "".join(chunks)
+        else:
+            response = cast(
+                Dict[str, Any],
+                self.llm.create_chat_completion(
+                    messages=cast(list[Any], messages),
+                    max_tokens=self.max_generated_tokens,
+                    stop=self.stop_tokens,
+                ),
+            )
+            message = response["choices"][0]["message"]
+            raw_text = message.get("content") or ""
 
-        message = response["choices"][0]["message"]
-        content = self._sanitize_output(message.get("content") or "")
-        return content
+        return self._sanitize_output(raw_text)
 
     def _sanitize_output(self, generated_text: str) -> str:
         """Remove chat prefixes and GGUF stop tokens from model output."""
@@ -329,6 +420,9 @@ class RadiologyAI:
                 cleaned = cleaned.replace(token, "")
 
         cleaned = cleaned.strip()
+        user_marker = "\nUSER:"
+        if user_marker in cleaned:
+            cleaned = cleaned.split(user_marker, maxsplit=1)[0].rstrip()
 
         return cleaned
 
@@ -394,6 +488,7 @@ class LlavaAI:
         self,
         model_id: str = "llava-hf/llava-1.5-7b-hf",
         max_image_edge: int = DEFAULT_MAX_IMAGE_EDGE,
+        max_generated_tokens: Optional[int] = None,
     ) -> None:
         """
         Initialize the LlavaAI engine by loading the LLaVA model.
@@ -425,6 +520,11 @@ class LlavaAI:
             if max_image_edge <= 0:
                 raise ValueError("max_image_edge must be a positive integer.")
             self.max_image_edge = max_image_edge
+            self.max_generated_tokens = (
+                max_generated_tokens or DEFAULT_MAX_GENERATED_TOKENS
+            )
+            if self.max_generated_tokens <= 0:
+                raise ValueError("max_generated_tokens must be a positive integer.")
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
             logger.info("LlavaAI using device: %s", self.device)
 
@@ -503,7 +603,9 @@ class LlavaAI:
         )
 
         # Generate the response
-        output = self.model.generate(**inputs, max_new_tokens=300)
+        output = self.model.generate(
+            **inputs, max_new_tokens=self.max_generated_tokens
+        )
 
         # Decode and extract the assistant's response
         decoded_text: str = self.processor.decode(output[0], skip_special_tokens=True)
