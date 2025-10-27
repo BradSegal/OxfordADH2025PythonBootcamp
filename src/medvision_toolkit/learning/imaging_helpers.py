@@ -33,6 +33,10 @@ def initialize_medgemma_engine(
     backend: str = "gguf",
     max_image_edge: int = DEFAULT_MAX_IMAGE_EDGE,
     *,
+    model_id: Optional[str] = None,
+    gguf_filename: Optional[str] = None,
+    gguf_model_id: Optional[str] = None,
+    gguf_mmproj: Optional[str] = None,
     use_sampling: Optional[bool] = None,
     sampling_temperature: Optional[float] = None,
     sampling_top_p: Optional[float] = None,
@@ -50,6 +54,34 @@ def initialize_medgemma_engine(
     max_image_edge : int, optional
         Maximum size for the image's longest edge in pixels.
 
+    model_id : str, optional
+        HuggingFace model identifier for the Transformers backend. If not provided,
+        uses the default MedGemma model.
+
+    gguf_filename : str, optional
+        GGUF model filename for the llama.cpp backend. If not provided, uses the
+        default quantized MedGemma model.
+
+    gguf_model_id : str, optional
+        HuggingFace repository containing the GGUF model. If not provided, uses
+        the default MedGemma GGUF repository.
+
+    gguf_mmproj : str, optional
+        Multimodal projection filename for GGUF models. If not provided, uses
+        the default projection file.
+
+    use_sampling : bool, optional
+        Enable sampling for generation instead of greedy decoding.
+
+    sampling_temperature : float, optional
+        Temperature for sampling (requires use_sampling=True).
+
+    sampling_top_p : float, optional
+        Nucleus sampling probability (requires use_sampling=True).
+
+    sampling_top_k : int, optional
+        Top-k sampling limit (requires use_sampling=True).
+
     Returns
     -------
     RadiologyAI
@@ -60,14 +92,31 @@ def initialize_medgemma_engine(
     if backend_normalised not in {"gguf", "transformers"}:
         raise ValueError("backend must be either 'gguf' or 'transformers'.")
     logger.info("Initialising RadiologyAI with %s backend.", backend_normalised)
-    return RadiologyAI(
-        backend=backend_normalised,
-        max_image_edge=max_image_edge,
-        use_sampling=use_sampling,
-        sampling_temperature=sampling_temperature,
-        sampling_top_p=sampling_top_p,
-        sampling_top_k=sampling_top_k,
-    )
+
+    # Build kwargs for RadiologyAI, only passing non-None overrides
+    init_kwargs: dict = {
+        "backend": backend_normalised,
+        "max_image_edge": max_image_edge,
+    }
+
+    if model_id is not None:
+        init_kwargs["model_id"] = model_id
+    if gguf_filename is not None:
+        init_kwargs["gguf_filename"] = gguf_filename
+    if gguf_model_id is not None:
+        init_kwargs["gguf_model_id"] = gguf_model_id
+    if gguf_mmproj is not None:
+        init_kwargs["gguf_mmproj"] = gguf_mmproj
+    if use_sampling is not None:
+        init_kwargs["use_sampling"] = use_sampling
+    if sampling_temperature is not None:
+        init_kwargs["sampling_temperature"] = sampling_temperature
+    if sampling_top_p is not None:
+        init_kwargs["sampling_top_p"] = sampling_top_p
+    if sampling_top_k is not None:
+        init_kwargs["sampling_top_k"] = sampling_top_k
+
+    return RadiologyAI(**init_kwargs)
 
 
 def initialize_llava_engine() -> LlavaAI:

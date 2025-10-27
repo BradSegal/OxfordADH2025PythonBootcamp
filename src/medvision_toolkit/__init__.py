@@ -15,6 +15,15 @@ LlavaAI : class
     Experimental AI engine using LLaVA-1.5-7B model for general-purpose
     vision-language tasks and benchmarking exercises.
 
+Notes
+-----
+The RadiologyAI and LlavaAI classes are lazy-loaded to avoid importing heavy
+dependencies (torch, transformers, llama-cpp-python) when only using patient
+profile utilities. Import them explicitly when needed:
+
+    >>> from medvision_toolkit import RadiologyAI  # triggers AI dependency load
+    >>> from medvision_toolkit import load_sample_patient  # lightweight, no AI deps
+
 Examples
 --------
 >>> from medvision_toolkit import RadiologyAI
@@ -22,6 +31,7 @@ Examples
 >>> report = ai.analyze("chest_xray.jpg", "Describe any abnormalities")
 """
 
+# Import lightweight learning utilities (no ML dependencies)
 from medvision_toolkit.learning import (
     PatientDemographics,
     PatientMedicationPlan,
@@ -45,11 +55,27 @@ from medvision_toolkit.learning import (
     summarize_patient,
     triage_pain_scores,
 )
-from medvision_toolkit.radiology_helpers import (
-    LlavaAI,
-    RadiologyAI,
-    llama_cpp_has_cuda_support,
-)
+
+
+# Lazy-load heavy AI classes to avoid importing torch/transformers/llama-cpp
+# unless explicitly needed. This allows notebooks 00 and 01 to use patient
+# utilities without waiting 5-10 minutes for ML dependency installation.
+def __getattr__(name: str):
+    """
+    Lazy import for heavy AI dependencies.
+
+    Delays importing radiology_helpers (which requires torch/transformers)
+    until RadiologyAI, LlavaAI, or llama_cpp_has_cuda_support are accessed.
+    """
+    if name in ("RadiologyAI", "LlavaAI", "llama_cpp_has_cuda_support"):
+        from medvision_toolkit.radiology_helpers import (
+            LlavaAI,
+            RadiologyAI,
+            llama_cpp_has_cuda_support,
+        )
+        globals()[name] = locals()[name]
+        return locals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __version__ = "0.1.0"
 __all__ = [
