@@ -13,7 +13,7 @@ import base64
 import importlib.util
 import logging
 from io import BytesIO
-from typing import Any, Callable, Dict, Optional, Sequence, cast
+from typing import Any, Callable, Dict, Iterable, Optional, Protocol, Sequence, cast
 
 import requests
 import torch
@@ -73,10 +73,28 @@ def _enforce_max_image_edge(image: Image.Image, max_edge: int) -> Image.Image:
     return resized
 
 
+class _ChatProcessor(Protocol):
+    """Protocol describing the processor interface required by RadiologyAI."""
+
+    def apply_chat_template(
+        self, conversation: Sequence[Dict[str, Any]], add_generation_prompt: bool = ...
+    ) -> str: ...
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Dict[str, torch.Tensor]: ...
+
+    def decode(
+        self, token_ids: Sequence[int], skip_special_tokens: bool = ...
+    ) -> str: ...
+
+    def batch_decode(
+        self, sequences: torch.Tensor, skip_special_tokens: bool = ...
+    ) -> list[str]: ...
+
+
 class _StopOnSubstrings(StoppingCriteria):
     """Custom stopping criteria that halts generation on defined substrings."""
 
-    def __init__(self, stop_strings: Sequence[str], processor: AutoProcessor) -> None:
+    def __init__(self, stop_strings: Sequence[str], processor: _ChatProcessor) -> None:
         self.stop_strings = [marker for marker in stop_strings if marker]
         self.processor = processor
 
@@ -125,7 +143,7 @@ class RadiologyAI:
 
     def __init__(
         self,
-        model_id: str = "google/medgemma-4b-it",
+        model_id: str = "unsloth/medgemma-4b-it",
         backend: str = "gguf",
         gguf_filename: str = "medgemma-4b-it-Q4_0.gguf",
         gguf_model_id: str = "unsloth/medgemma-4b-it-GGUF",
@@ -134,6 +152,10 @@ class RadiologyAI:
         max_image_edge: int = DEFAULT_MAX_IMAGE_EDGE,
         context_tokens: Optional[int] = None,
         max_generated_tokens: Optional[int] = None,
+        use_sampling: Optional[bool] = None,
+        sampling_temperature: Optional[float] = None,
+        sampling_top_p: Optional[float] = None,
+        sampling_top_k: Optional[int] = None,
     ) -> None:
         """
         Initialize the RadiologyAI engine by loading the MedGemma model.
@@ -168,14 +190,31 @@ class RadiologyAI:
         self.context_tokens = context_tokens or DEFAULT_CONTEXT_TOKENS
         if self.context_tokens <= 0:
             raise ValueError("context_tokens must be a positive integer.")
-        self.max_generated_tokens = (
-            max_generated_tokens or DEFAULT_MAX_GENERATED_TOKENS
-        )
+        self.max_generated_tokens = max_generated_tokens or DEFAULT_MAX_GENERATED_TOKENS
         if self.max_generated_tokens <= 0:
             raise ValueError("max_generated_tokens must be a positive integer.")
         self.max_image_edge = max_image_edge
         self.backend = backend.lower()
+        self.model_dtype: torch.dtype = torch.float32
         self.chat_handler: Optional[Any] = None
+        self.processor: Optional[_ChatProcessor] = None
+        # Model Properties
+        self.model_id: str = model_id
+        self.gguf_filename: str = gguf_filename
+        self.gguf_model_id: str = gguf_model_id
+        self.gguf_mmproj: str = gguf_mmproj
+        self.gguf_stop: Optional[list[str]] = gguf_stop
+        # Sampler settings
+        self.use_sampling = True if use_sampling is None else bool(use_sampling)
+        if sampling_temperature is not None and sampling_temperature <= 0:
+            raise ValueError("sampling_temperature must be a positive float.")
+        if sampling_top_p is not None and not (0 < sampling_top_p <= 1):
+            raise ValueError("sampling_top_p must lie in the interval (0, 1].")
+        if sampling_top_k is not None and sampling_top_k <= 0:
+            raise ValueError("sampling_top_k must be a positive integer.")
+        self.sampling_temperature = sampling_temperature or 0.7
+        self.sampling_top_p = sampling_top_p or 0.9
+        self.sampling_top_k = sampling_top_k
         base_stop_tokens: list[str] = []
         if gguf_stop is not None:
             for token in gguf_stop:
@@ -204,13 +243,27 @@ class RadiologyAI:
         try:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
             logger.info("RadiologyAI (Transformers) using device: %s", self.device)
+            if self.device == "cuda":
+                bf16_supported = False
+                try:
+                    bf16_supported = torch.cuda.is_bf16_supported()
+                except AttributeError:  # pragma: no cover - defensive for older torch
+                    bf16_supported = False
+                self.model_dtype = torch.bfloat16 if bf16_supported else torch.float16
+            else:
+                self.model_dtype = torch.float32
+            logger.info(
+                "RadiologyAI (Transformers) selecting dtype: %s", self.model_dtype
+            )
             self.model = AutoModelForImageTextToText.from_pretrained(
                 model_id,
-                torch_dtype=torch.bfloat16,
+                dtype=self.model_dtype,
                 device_map="auto",
                 trust_remote_code=True,
             )
-            self.processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
+            self.processor = cast(
+                _ChatProcessor, AutoProcessor.from_pretrained(model_id, use_fast=True)
+            )
             logger.info("RadiologyAI (Transformers) initialized successfully.")
         except Exception:
             logger.exception(
@@ -292,6 +345,11 @@ class RadiologyAI:
         prompt: str,
         persona: str = "radiologist",
         stream_callback: Optional[Callable[[str], None]] = None,
+        *,
+        use_sampling: Optional[bool] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
     ) -> str:
         """
         Analyze a medical image and return a text-based report.
@@ -313,6 +371,14 @@ class RadiologyAI:
             Streaming callback invoked with incremental text chunks when the
             GGUF backend is used. When provided, generation is streamed while
             the final consolidated report is still returned.
+        use_sampling : bool, optional
+            Override the engine-level sampling flag for this request.
+        temperature : float, optional
+            Sampling temperature applied when ``use_sampling`` is enabled.
+        top_p : float, optional
+            Nucleus sampling probability (0 < top_p <= 1) when sampling.
+        top_k : int, optional
+            Limits sampling to the ``top_k`` most likely tokens when provided.
 
         Returns
         -------
@@ -336,12 +402,42 @@ class RadiologyAI:
         RuntimeError
             If model generation fails due to resource constraints or other runtime issues.
         """
+        if temperature is not None and temperature <= 0:
+            raise ValueError("temperature must be a positive float.")
+        if top_p is not None and not (0 < top_p <= 1):
+            raise ValueError("top_p must lie in the interval (0, 1].")
+        if top_k is not None and top_k <= 0:
+            raise ValueError("top_k must be a positive integer.")
+
+        effective_use_sampling = (
+            self.use_sampling if use_sampling is None else bool(use_sampling)
+        )
+        user_requested_sampling = any(
+            value is not None for value in (temperature, top_p, top_k)
+        )
+        if user_requested_sampling and not effective_use_sampling:
+            effective_use_sampling = True
+        effective_temperature = (
+            temperature if temperature is not None else self.sampling_temperature
+        )
+        effective_top_p = top_p if top_p is not None else self.sampling_top_p
+        effective_top_k = top_k if top_k is not None else self.sampling_top_k
+
         if self.backend == "gguf":
             return self._analyze_with_llama_cpp(
-                image_path_or_url, prompt, persona, stream_callback
+                image_path_or_url,
+                prompt,
+                persona,
+                stream_callback,
+                effective_use_sampling,
+                effective_temperature if effective_use_sampling else None,
+                effective_top_p if effective_use_sampling else None,
+                effective_top_k if effective_use_sampling else None,
             )
 
         image = self._load_image(image_path_or_url)
+        if self.processor is None:
+            raise RuntimeError("Transformers processor is not initialised.")
         system_prompt = f"You are an expert {persona}."
 
         messages = [
@@ -356,23 +452,47 @@ class RadiologyAI:
         ]
 
         prompt_text = self.processor.apply_chat_template(
-            messages, add_generation_prompt=True
+            cast(Sequence[Dict[str, Any]], messages), add_generation_prompt=True
         )
 
-        inputs = self.processor(text=prompt_text, images=image, return_tensors="pt").to(
-            self.device, torch.bfloat16
+        encoded = self.processor(text=prompt_text, images=image, return_tensors="pt")
+        input_token_length = (
+            encoded["input_ids"].shape[-1] if "input_ids" in encoded else None
         )
+        inputs: dict[str, Any] = {}
+        for key, value in encoded.items():
+            tensor = value.to(self.device) if hasattr(value, "to") else value
+            inputs[key] = tensor
+
+        pixel_key = "pixel_values"
+        if pixel_key in inputs:
+            inputs[pixel_key] = inputs[pixel_key].to(self.model_dtype)
 
         generate_kwargs: dict[str, Any] = {"max_new_tokens": self.max_generated_tokens}
-        if self.stop_tokens:
+        if self.backend != "transformers" and self.stop_tokens:
             stopping_list = StoppingCriteriaList(
                 [_StopOnSubstrings(self.stop_tokens, self.processor)]
             )
             generate_kwargs["stopping_criteria"] = stopping_list
 
-        output = self.model.generate(**inputs, **generate_kwargs)
+        generate_kwargs["do_sample"] = effective_use_sampling
+        if effective_use_sampling:
+            if effective_temperature is not None:
+                generate_kwargs["temperature"] = effective_temperature
+            if effective_top_p is not None:
+                generate_kwargs["top_p"] = effective_top_p
+            if effective_top_k is not None:
+                generate_kwargs["top_k"] = effective_top_k
 
-        decoded_text: str = self.processor.decode(output[0], skip_special_tokens=True)
+        output = self.model.generate(**inputs, **generate_kwargs)
+        if input_token_length is not None:
+            generated_tokens = output[:, input_token_length:]
+        else:
+            generated_tokens = output
+        decoded_list = self.processor.batch_decode(
+            generated_tokens, skip_special_tokens=True
+        )
+        decoded_text = decoded_list[0] if decoded_list else ""
         return self._sanitize_output(decoded_text)
 
     def _analyze_with_llama_cpp(
@@ -381,6 +501,10 @@ class RadiologyAI:
         prompt: str,
         persona: str,
         stream_callback: Optional[Callable[[str], None]],
+        use_sampling: bool,
+        temperature: Optional[float],
+        top_p: Optional[float],
+        top_k: Optional[int],
     ) -> str:
         image = self._load_image(image_path_or_url)
         buffer = BytesIO()
@@ -402,12 +526,25 @@ class RadiologyAI:
             },
         ]
 
+        llama_kwargs: Dict[str, Any] = {
+            "messages": cast(list[Any], messages),
+            "max_tokens": self.max_generated_tokens,
+            "stop": self.stop_tokens,
+        }
+        if use_sampling:
+            if temperature is not None:
+                llama_kwargs["temperature"] = temperature
+            if top_p is not None:
+                llama_kwargs["top_p"] = top_p
+            if top_k is not None:
+                llama_kwargs["top_k"] = top_k
+
         if stream_callback is not None:
-            stream = self.llm.create_chat_completion(
-                messages=cast(list[Any], messages),
-                max_tokens=self.max_generated_tokens,
-                stop=self.stop_tokens,
-                stream=True,
+            llama_kwargs_stream = dict(llama_kwargs)
+            llama_kwargs_stream["stream"] = True
+            stream = cast(
+                Iterable[Dict[str, Any]],
+                self.llm.create_chat_completion(**llama_kwargs_stream),
             )
             chunks: list[str] = []
             for update in stream:
@@ -416,18 +553,14 @@ class RadiologyAI:
                     continue
                 delta = choices[0].get("delta") or {}
                 piece = delta.get("content")
-                if piece:
+                if isinstance(piece, str):
                     chunks.append(piece)
                     stream_callback(piece)
             raw_text = "".join(chunks)
         else:
             response = cast(
                 Dict[str, Any],
-                self.llm.create_chat_completion(
-                    messages=cast(list[Any], messages),
-                    max_tokens=self.max_generated_tokens,
-                    stop=self.stop_tokens,
-                ),
+                self.llm.create_chat_completion(**llama_kwargs),
             )
             message = response["choices"][0]["message"]
             raw_text = message.get("content") or ""
@@ -438,8 +571,16 @@ class RadiologyAI:
         """Remove chat prefixes and GGUF stop tokens from model output."""
 
         cleaned = generated_text.strip()
-        if cleaned.startswith("assistant\n"):
-            cleaned = cleaned.split("assistant\n", maxsplit=1)[-1].strip()
+        for marker in (
+            "assistant\n",
+            "assistant:",
+            "model\n",
+            "model:",
+            "ASSISTANT:",
+            "MODEL:",
+        ):
+            if cleaned.startswith(marker):
+                cleaned = cleaned[len(marker) :].strip()
 
         user_marker = "\nUSER:"
         if user_marker in cleaned:
@@ -631,9 +772,7 @@ class LlavaAI:
         )
 
         # Generate the response
-        output = self.model.generate(
-            **inputs, max_new_tokens=self.max_generated_tokens
-        )
+        output = self.model.generate(**inputs, max_new_tokens=self.max_generated_tokens)
 
         # Decode and extract the assistant's response
         decoded_text: str = self.processor.decode(output[0], skip_special_tokens=True)

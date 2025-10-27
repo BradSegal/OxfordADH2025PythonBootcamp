@@ -30,7 +30,13 @@ _MAX_IMAGING_SUMMARY_LEN = 200
 
 
 def initialize_medgemma_engine(
-    backend: str = "gguf", max_image_edge: int = DEFAULT_MAX_IMAGE_EDGE
+    backend: str = "gguf",
+    max_image_edge: int = DEFAULT_MAX_IMAGE_EDGE,
+    *,
+    use_sampling: Optional[bool] = None,
+    sampling_temperature: Optional[float] = None,
+    sampling_top_p: Optional[float] = None,
+    sampling_top_k: Optional[int] = None,
 ) -> RadiologyAI:
     """
     Initialise the MedGemma-backed radiology engine.
@@ -57,6 +63,10 @@ def initialize_medgemma_engine(
     return RadiologyAI(
         backend=backend_normalised,
         max_image_edge=max_image_edge,
+        use_sampling=use_sampling,
+        sampling_temperature=sampling_temperature,
+        sampling_top_p=sampling_top_p,
+        sampling_top_k=sampling_top_k,
     )
 
 
@@ -122,8 +132,16 @@ def _strip_assistant_prefix(report_text: str) -> str:
     """
 
     cleaned = report_text.strip()
-    if cleaned.startswith("assistant\n"):
-        return cleaned.split("assistant\n", maxsplit=1)[-1].strip()
+    for marker in (
+        "assistant\n",
+        "assistant:",
+        "model\n",
+        "model:",
+        "ASSISTANT:",
+        "MODEL:",
+    ):
+        if cleaned.startswith(marker):
+            cleaned = cleaned[len(marker) :].strip()
     return cleaned
 
 
@@ -146,6 +164,11 @@ def stream_ai_report(
     image_path_or_url: str,
     prompt: str,
     persona: str,
+    *,
+    use_sampling: Optional[bool] = None,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    top_k: Optional[int] = None,
 ) -> str:
     """
     Generate and display an AI report, streaming updates when supported.
@@ -186,6 +209,10 @@ def stream_ai_report(
             prompt=prompt,
             persona=persona,
             stream_callback=_on_chunk,
+            use_sampling=use_sampling,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
         )
 
         handle.update(Markdown(final_report))
@@ -195,6 +222,10 @@ def stream_ai_report(
         image_path_or_url=image_path_or_url,
         prompt=prompt,
         persona=persona,
+        use_sampling=use_sampling,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
     )
     render_ai_report(final_report)
     return final_report

@@ -23,7 +23,8 @@ Each notebook opens with a “Run Once” setup cell that clones the repository 
 
 ## GPU Runtime Requirements
 - Launch Colab with a GPU runtime (`Runtime → Change runtime type → GPU`). The setup cell now raises an explicit error if CUDA is unavailable after the dependency install.
-- The setup cell automatically installs the CUDA 12.1 PyTorch and llama.cpp wheels. If a network hiccup forces a CPU-only fallback, rerun the setup cell; the subsequent verification cell will flag any missing GPU support.
+- The setup cell reuses the preinstalled CUDA-enabled PyTorch whenever possible and only downloads heavy wheels when acceleration is missing. If a network hiccup forces a CPU-only fallback, rerun the setup cell; the subsequent verification cell will flag any missing GPU support.
+- Colab’s scientific stack ships with `numpy 1.26.x`. The setup cell now enforces this version automatically; if a forced downgrade fails, restart the runtime before rerunning the setup cell.
 - For local development on GPU workstations, manually install a CUDA-enabled PyTorch build before `pip install -r requirements.txt`, then reinstall `llama-cpp-python` with CUDA support (`pip install --extra-index-url https://jllllll.github.io/llama-cpp-python/whl/cu121 llama-cpp-python==0.2.78`).
 
 ## Running Locally (Faculty & Contributors)

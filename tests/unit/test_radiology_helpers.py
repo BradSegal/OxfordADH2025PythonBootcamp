@@ -26,11 +26,17 @@ from medvision_toolkit.radiology_helpers import (
 class TestRadiologyAI:
     """Unit tests for the RadiologyAI class."""
 
+    @patch(
+        "medvision_toolkit.radiology_helpers.torch.cuda.is_available",
+        return_value=False,
+    )
     @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
     @patch(
         "medvision_toolkit.radiology_helpers.AutoModelForImageTextToText.from_pretrained"
     )
-    def test_init_success(self, mock_model_loader, mock_processor_loader):
+    def test_init_success(
+        self, mock_model_loader, mock_processor_loader, mock_cuda_available
+    ):
         """Test that RadiologyAI initializes correctly with mocked dependencies."""
         # Configure the mock instances
         mock_model = MagicMock()
@@ -42,26 +48,35 @@ class TestRadiologyAI:
         ai_engine = RadiologyAI(backend="transformers")
 
         # Assert the loaders were called with correct parameters
-        mock_model_loader.assert_called_once_with(
-            "google/medgemma-4b-it",
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
-        )
+        mock_model_loader.assert_called_once()
+        call_args = mock_model_loader.call_args
+        assert call_args.args[0] == "unsloth/medgemma-4b-it"
+        assert call_args.kwargs["torch_dtype"] == torch.float32
         mock_processor_loader.assert_called_once_with(
-            "google/medgemma-4b-it", use_fast=True
+            "unsloth/medgemma-4b-it", use_fast=True
         )
 
         # Assert the instance attributes are set correctly
         assert ai_engine.model == mock_model
         assert ai_engine.processor == mock_processor
         assert ai_engine.device in ["cuda", "cpu"]
+        assert ai_engine.model_dtype == torch.float32
+        assert ai_engine.use_sampling is True
+        assert ai_engine.sampling_temperature == pytest.approx(0.7)
+        assert ai_engine.sampling_top_p == pytest.approx(0.9)
+        assert ai_engine.sampling_top_k is None
 
+    @patch(
+        "medvision_toolkit.radiology_helpers.torch.cuda.is_available",
+        return_value=False,
+    )
     @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
     @patch(
         "medvision_toolkit.radiology_helpers.AutoModelForImageTextToText.from_pretrained"
     )
-    def test_init_with_custom_model_id(self, mock_model_loader, mock_processor_loader):
+    def test_init_with_custom_model_id(
+        self, mock_model_loader, mock_processor_loader, mock_cuda_available
+    ):
         """Test RadiologyAI initialization with a custom model ID."""
         mock_model = MagicMock()
         mock_processor = MagicMock()
@@ -71,10 +86,71 @@ class TestRadiologyAI:
         custom_model = "custom/model-id"
         ai_engine = RadiologyAI(model_id=custom_model, backend="transformers")
 
-        mock_model_loader.assert_called_once()
-        assert mock_model_loader.call_args[0][0] == custom_model
+        mock_model_loader.assert_called_once_with(
+            custom_model,
+            torch_dtype=torch.float32,
+            device_map="auto",
+            trust_remote_code=True,
+        )
         assert ai_engine.model == mock_model
         assert ai_engine.processor == mock_processor
+        assert ai_engine.use_sampling is True
+
+    @patch(
+        "medvision_toolkit.radiology_helpers.torch.cuda.is_bf16_supported",
+        return_value=False,
+    )
+    @patch(
+        "medvision_toolkit.radiology_helpers.torch.cuda.is_available", return_value=True
+    )
+    @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.AutoModelForImageTextToText.from_pretrained"
+    )
+    def test_transformers_dtype_fp16_without_bf16_support(
+        self,
+        mock_model_loader,
+        mock_processor_loader,
+        mock_cuda_available,
+        mock_bf16_supported,
+    ):
+        """GPU runtimes without BF16 should fall back to float16."""
+        mock_model_loader.return_value = MagicMock()
+        mock_processor_loader.return_value = MagicMock()
+
+        ai_engine = RadiologyAI(backend="transformers")
+
+        dtype = mock_model_loader.call_args.kwargs["torch_dtype"]
+        assert dtype == torch.float16
+        assert ai_engine.model_dtype == torch.float16
+
+    @patch(
+        "medvision_toolkit.radiology_helpers.torch.cuda.is_bf16_supported",
+        return_value=True,
+    )
+    @patch(
+        "medvision_toolkit.radiology_helpers.torch.cuda.is_available", return_value=True
+    )
+    @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.AutoModelForImageTextToText.from_pretrained"
+    )
+    def test_transformers_dtype_bf16_when_supported(
+        self,
+        mock_model_loader,
+        mock_processor_loader,
+        mock_cuda_available,
+        mock_bf16_supported,
+    ):
+        """BF16-capable GPUs should load weights in bfloat16."""
+        mock_model_loader.return_value = MagicMock()
+        mock_processor_loader.return_value = MagicMock()
+
+        ai_engine = RadiologyAI(backend="transformers")
+
+        dtype = mock_model_loader.call_args.kwargs["torch_dtype"]
+        assert dtype == torch.bfloat16
+        assert ai_engine.model_dtype == torch.bfloat16
 
     @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
     @patch(
@@ -255,18 +331,18 @@ class TestRadiologyAI:
         mock_image = Image.new("RGB", (100, 100))
         mock_load_image.return_value = mock_image
 
-        # Mock the processor and model response
-        mock_inputs = MagicMock()
-        mock_processor.return_value = mock_inputs
-        mock_inputs.to.return_value = mock_inputs
-
-        mock_output = MagicMock()
-        mock_model.generate.return_value = mock_output
-
-        canned_response = (
+        mock_processor.apply_chat_template.return_value = "formatted_prompt"
+        encoded_inputs = {
+            "input_ids": torch.tensor([[10, 11, 12]], dtype=torch.long),
+            "pixel_values": torch.ones((1, 3, 4, 4), dtype=torch.float32),
+        }
+        mock_processor.return_value = encoded_inputs
+        generated_ids = torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long)
+        mock_model.generate.return_value = generated_ids
+        canned_response = [
             "assistant\nThis is a test report showing normal findings.<end_of_turn>"
-        )
-        mock_processor.decode.return_value = canned_response
+        ]
+        mock_processor.batch_decode.return_value = canned_response
         mock_processor.apply_chat_template.return_value = "formatted_prompt"
 
         # Initialize and analyze
@@ -295,6 +371,11 @@ class TestRadiologyAI:
 
         # Verify model.generate was called
         mock_model.generate.assert_called_once()
+        generate_kwargs = mock_model.generate.call_args.kwargs
+        assert generate_kwargs["do_sample"] is True
+        assert generate_kwargs["temperature"] == pytest.approx(0.7)
+        assert generate_kwargs["top_p"] == pytest.approx(0.9)
+        assert "top_k" not in generate_kwargs
 
         # Verify the response was correctly extracted
         assert result == "This is a test report showing normal findings."
@@ -315,11 +396,15 @@ class TestRadiologyAI:
 
         mock_load_image.return_value = Image.new("RGB", (100, 100))
 
-        mock_inputs = MagicMock()
-        mock_processor.return_value = mock_inputs
-        mock_inputs.to.return_value = mock_inputs
-        mock_model.generate.return_value = MagicMock()
-        mock_processor.decode.return_value = "assistant\nTest"
+        encoded_inputs = {
+            "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
+            "pixel_values": torch.ones((1, 3, 4, 4), dtype=torch.float32),
+        }
+        mock_processor.return_value = encoded_inputs
+        mock_model.generate.return_value = torch.tensor(
+            [[1, 2, 3, 4]], dtype=torch.long
+        )
+        mock_processor.batch_decode.return_value = ["assistant\nTest"]
         mock_processor.apply_chat_template.return_value = "formatted_prompt"
 
         ai_engine = RadiologyAI(backend="transformers")
@@ -329,6 +414,61 @@ class TestRadiologyAI:
         mock_processor.apply_chat_template.assert_called_once()
         conversation = mock_processor.apply_chat_template.call_args[0][0]
         assert "expert radiologist" in conversation[0]["content"]
+        generate_kwargs = mock_model.generate.call_args.kwargs
+        assert generate_kwargs["do_sample"] is True
+        assert generate_kwargs["temperature"] == pytest.approx(0.7)
+        assert generate_kwargs["top_p"] == pytest.approx(0.9)
+
+    @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.AutoModelForImageTextToText.from_pretrained"
+    )
+    @patch("medvision_toolkit.radiology_helpers.RadiologyAI._load_image")
+    def test_analyze_transformers_sampling_overrides(
+        self, mock_load_image, mock_model_loader, mock_processor_loader
+    ):
+        """Sampling parameters should influence transformer decoding."""
+
+        mock_model = MagicMock()
+        mock_processor = MagicMock()
+        mock_model_loader.return_value = mock_model
+        mock_processor_loader.return_value = mock_processor
+
+        mock_image = Image.new("RGB", (100, 100))
+        mock_load_image.return_value = mock_image
+        mock_processor.apply_chat_template.return_value = "formatted_prompt"
+        encoded_inputs = {
+            "input_ids": torch.tensor([[5, 6, 7]], dtype=torch.long),
+            "pixel_values": torch.ones((1, 3, 4, 4), dtype=torch.float32),
+        }
+        mock_processor.return_value = encoded_inputs
+        mock_model.generate.return_value = torch.tensor(
+            [[5, 6, 7, 8, 9]], dtype=torch.long
+        )
+        mock_processor.batch_decode.return_value = ["assistant\nDetailed"]
+
+        ai_engine = RadiologyAI(
+            backend="transformers",
+            use_sampling=True,
+            sampling_temperature=0.6,
+            sampling_top_p=0.85,
+            sampling_top_k=50,
+        )
+
+        result = ai_engine.analyze(
+            "http://example.com/img.jpg",
+            "Describe",
+            temperature=0.55,
+            top_p=0.75,
+            top_k=32,
+        )
+
+        kwargs = mock_model.generate.call_args.kwargs
+        assert kwargs["do_sample"] is True
+        assert kwargs["temperature"] == pytest.approx(0.55)
+        assert kwargs["top_p"] == pytest.approx(0.75)
+        assert kwargs["top_k"] == 32
+        assert result == "Detailed"
 
     @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
     @patch(
@@ -427,13 +567,17 @@ class TestRadiologyAI:
         stop_markers = mock_llama.create_chat_completion.call_args[1]["stop"]
         assert "\nUSER:" in stop_markers
         assert "USER:" in stop_markers
+        call_kwargs = mock_llama.create_chat_completion.call_args[1]
+        assert call_kwargs["temperature"] == pytest.approx(0.7)
+        assert call_kwargs["top_p"] == pytest.approx(0.9)
         assert result == "GGUF response with detail."
 
     @patch("medvision_toolkit.radiology_helpers.requests.get")
     @patch("llama_cpp.Llama.from_pretrained")
     @patch("llama_cpp.llama_chat_format.Llava15ChatHandler.from_pretrained")
     @patch(
-        "medvision_toolkit.radiology_helpers.torch.cuda.is_available", return_value=False
+        "medvision_toolkit.radiology_helpers.torch.cuda.is_available",
+        return_value=False,
     )
     @patch(
         "medvision_toolkit.radiology_helpers.llama_cpp_has_cuda_support",
@@ -482,6 +626,64 @@ class TestRadiologyAI:
             "Second part.<end_of_turn>",
         ]
         assert final_report == "First part. Second part."
+
+    @patch("medvision_toolkit.radiology_helpers.requests.get")
+    @patch("llama_cpp.Llama.from_pretrained")
+    @patch("llama_cpp.llama_chat_format.Llava15ChatHandler.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.torch.cuda.is_available",
+        return_value=False,
+    )
+    @patch(
+        "medvision_toolkit.radiology_helpers.llama_cpp_has_cuda_support",
+        return_value=False,
+    )
+    def test_analyze_with_llama_cpp_sampling_overrides(
+        self,
+        mock_llama_cuda_support,
+        mock_cuda_available,
+        mock_chat_handler_loader,
+        mock_llama_loader,
+        mock_requests_get,
+    ):
+        """Sampling controls should flow to llama.cpp."""
+
+        mock_chat_handler = MagicMock()
+        mock_chat_handler_loader.return_value = mock_chat_handler
+        mock_llama = MagicMock()
+        mock_llama.create_chat_completion.return_value = {
+            "choices": [{"message": {"content": "assistant\nDetailed"}}]
+        }
+        mock_llama_loader.return_value = mock_llama
+
+        test_image = Image.new("RGB", (32, 32), color="white")
+        buffer = BytesIO()
+        test_image.save(buffer, format="PNG")
+        buffer.seek(0)
+        mock_response = MagicMock()
+        mock_response.content = buffer.read()
+        mock_requests_get.return_value = mock_response
+
+        ai_engine = RadiologyAI(
+            backend="gguf",
+            use_sampling=True,
+            sampling_temperature=0.6,
+            sampling_top_p=0.85,
+            sampling_top_k=40,
+        )
+
+        result = ai_engine.analyze(
+            "http://example.com/test.jpg",
+            "Explain",
+            temperature=0.5,
+            top_p=0.7,
+        )
+
+        kwargs = mock_llama.create_chat_completion.call_args[1]
+        assert kwargs["temperature"] == pytest.approx(0.5)
+        assert kwargs["top_p"] == pytest.approx(0.7)
+        assert kwargs["top_k"] == 40
+        assert result == "Detailed"
 
     @patch("llama_cpp.Llama.from_pretrained")
     @patch("llama_cpp.llama_chat_format.Llava15ChatHandler.from_pretrained")
@@ -542,6 +744,21 @@ class TestRadiologyAI:
         cleaned = ai_engine._sanitize_output(raw)
         assert "USER:" not in cleaned
         assert cleaned == "Initial findings."
+
+    @patch("medvision_toolkit.radiology_helpers.AutoProcessor.from_pretrained")
+    @patch(
+        "medvision_toolkit.radiology_helpers.AutoModelForImageTextToText.from_pretrained"
+    )
+    def test_sanitize_output_strips_model_prefix(
+        self, mock_model_loader, mock_processor_loader
+    ):
+        """_sanitize_output should remove 'model' prefixes produced by MedGemma."""
+        mock_model_loader.return_value = MagicMock()
+        mock_processor_loader.return_value = MagicMock()
+
+        ai_engine = RadiologyAI(backend="transformers")
+        raw = "model\nDetailed analysis with findings."
+        assert ai_engine._sanitize_output(raw) == "Detailed analysis with findings."
 
 
 class TestLlavaAI:
